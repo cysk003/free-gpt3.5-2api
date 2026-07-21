@@ -120,6 +120,8 @@ func NewEngine() *gin.Engine {
 	v1Router.POST("/images/generations", service.ImagesGenerations)
 	v1Router.OPTIONS("/images/edits", nil)
 	v1Router.POST("/images/edits", service.ImagesEdits)
+	v1Router.OPTIONS("/models", nil)
+	v1Router.GET("/models", service.Models)
 	v1Router.OPTIONS("/chat/completions", nil)
 	v1Router.POST("/chat/completions", service.Completions)
 	v1Router.OPTIONS("/responses", nil)

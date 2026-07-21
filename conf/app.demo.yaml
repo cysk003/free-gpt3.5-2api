@@ -29,11 +29,17 @@ chatgpt_base_url: https://chatgpt.com
 # Account pool used by local sk-* auth keys.
 # Required field per account: access_token.
 # Other fields are optional metadata or auxiliary settings.
+# chatgpts 账号池：
+# - account_id / team_user_id -> 上游 Header: Chatgpt-Account-Id（Team 工作区）
+# - puid -> 上游 Cookie: _puid
+# - proxy 非空时覆盖全局 proxy
 chatgpts:
   - id_token: optional_id_token_1
     access_token: real_access_token_1
     refresh_token: optional_refresh_token_1
-    account_id: optional_account_id_1
+    account_id: optional_team_or_account_id_1
+    team_user_id: ""
+    puid: optional_puid_cookie_1
     last_refresh: ""
     email: user1@example.com
     type: codex
@@ -44,7 +50,9 @@ chatgpts:
   - id_token: optional_id_token_2
     access_token: real_access_token_2
     refresh_token: optional_refresh_token_2
-    account_id: optional_account_id_2
+    account_id: optional_team_or_account_id_2
+    team_user_id: ""
+    puid: optional_puid_cookie_2
     last_refresh: ""
     email: user2@example.com
     type: codex

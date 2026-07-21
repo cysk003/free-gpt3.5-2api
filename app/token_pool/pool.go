@@ -2,6 +2,7 @@ package token_pool
 
 import (
 	"chat2api/app/common"
+	"strings"
 	"sync"
 )
 
@@ -17,10 +18,12 @@ type AccessTokenPool struct {
 }
 
 type AccessToken struct {
-	Token     string `yaml:"token,omitempty"`
-	ExpiresAt int64  `yaml:"expires_at,omitempty"`
-	Proxy     string `yaml:"proxy,omitempty"`
-	CanUseAt  int64  `yaml:"-"`
+	Token      string `yaml:"token,omitempty"`
+	ExpiresAt  int64  `yaml:"expires_at,omitempty"`
+	Proxy      string `yaml:"proxy,omitempty"`
+	PUID       string `yaml:"puid,omitempty"`
+	TeamUserID string `yaml:"team_user_id,omitempty"` // Chatgpt-Account-Id
+	CanUseAt   int64  `yaml:"-"`
 }
 
 func newAccessTokenPool() *AccessTokenPool {
@@ -118,4 +121,28 @@ func (a *AccessTokenPool) SetCanUseAt(token string, canUseAt int64) {
 			break
 		}
 	}
+}
+
+// FindByToken 按 Authorization/Bearer token 查找池中账号元数据。
+func (a *AccessTokenPool) FindByToken(token string) *AccessToken {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	want := strings.TrimSpace(token)
+	if want == "" {
+		return nil
+	}
+	if !strings.HasPrefix(want, "Bearer ") && strings.HasPrefix(want, "eyJ") {
+		want = "Bearer " + want
+	}
+	for _, item := range a.AccessTokens {
+		if item == nil {
+			continue
+		}
+		got := strings.TrimSpace(item.Token)
+		if got == want || strings.TrimPrefix(got, "Bearer ") == strings.TrimPrefix(want, "Bearer ") {
+			cp := *item
+			return &cp
+		}
+	}
+	return nil
 }

@@ -31,6 +31,8 @@ type AdminChatGPT struct {
 	AccessToken  AdminSecret `json:"access_token"`
 	RefreshToken AdminSecret `json:"refresh_token"`
 	AccountID    string      `json:"account_id"`
+	TeamUserID   string      `json:"team_user_id"`
+	PUID         string      `json:"puid"`
 	LastRefresh  string      `json:"last_refresh"`
 	Email        string      `json:"email"`
 	Type         string      `json:"type"`
@@ -124,6 +126,8 @@ func adminConfigFromApp(path string, cfg app) AdminConfig {
 			AccessToken:  maskedAdminSecret(i, account.AccessToken, normalizeAuthToken),
 			RefreshToken: maskedAdminSecret(i, account.RefreshToken, strings.TrimSpace),
 			AccountID:    account.AccountId,
+			TeamUserID:   account.TeamUserID,
+			PUID:         account.PUID,
 			LastRefresh:  account.LastRefresh,
 			Email:        account.Email,
 			Type:         account.Type,
@@ -185,6 +189,8 @@ func resolveAdminChatGPTs(in []AdminChatGPT, current []chatgpt) []chatgpt {
 			AccessToken:  resolveAdminSecretValue(item.AccessToken, currentAccount.AccessToken, normalizeAuthToken),
 			RefreshToken: resolveAdminSecretValue(item.RefreshToken, currentAccount.RefreshToken, strings.TrimSpace),
 			AccountId:    strings.TrimSpace(item.AccountID),
+			TeamUserID:   strings.TrimSpace(item.TeamUserID),
+			PUID:         strings.TrimSpace(item.PUID),
 			LastRefresh:  strings.TrimSpace(item.LastRefresh),
 			Email:        strings.TrimSpace(item.Email),
 			Type:         strings.TrimSpace(item.Type),
@@ -214,6 +220,8 @@ func isEmptyChatGPT(account chatgpt) bool {
 		account.AccessToken == "" &&
 		account.RefreshToken == "" &&
 		account.AccountId == "" &&
+		account.TeamUserID == "" &&
+		account.PUID == "" &&
 		account.LastRefresh == "" &&
 		account.Email == "" &&
 		account.Type == "" &&
@@ -266,6 +274,8 @@ func chatGPTSequenceNode(accounts []chatgpt) *yaml.Node {
 		setStringChild(item, "access_token", normalizeAuthToken(account.AccessToken))
 		setStringChild(item, "refresh_token", strings.TrimSpace(account.RefreshToken))
 		setStringChild(item, "account_id", strings.TrimSpace(account.AccountId))
+		setStringChild(item, "team_user_id", strings.TrimSpace(account.TeamUserID))
+		setStringChild(item, "puid", strings.TrimSpace(account.PUID))
 		setStringChild(item, "last_refresh", strings.TrimSpace(account.LastRefresh))
 		setStringChild(item, "email", strings.TrimSpace(account.Email))
 		setStringChild(item, "type", strings.TrimSpace(account.Type))

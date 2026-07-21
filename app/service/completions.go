@@ -3,6 +3,7 @@ package service
 import (
 	"bufio"
 	"bytes"
+	"chat2api/app/chatgpt_backend"
 	"chat2api/app/common"
 	"chat2api/app/token_pool"
 	"chat2api/app/types/chat"
@@ -40,32 +41,123 @@ func Completions(c *gin.Context) {
 		common.ErrorResponse(c, http.StatusBadRequest, errStr, nil)
 		return
 	}
-	response, accessToken, err := sendChatRequest(c, chatReq)
+	result, err := runChatCompletionConversation(c, apiReq, chatReq)
 	if err != nil {
 		logx.WithContext(c.Request.Context()).Error(err.Error())
 		common.ErrorResponse(c, http.StatusBadGateway, "upstream request failed", err.Error())
 		return
 	}
-	defer response.Body.Close()
-	if handleResponseError(c, response, accessToken) {
-		return
-	}
-	result, err := handlerResponse(c, apiReq, response)
-	if err != nil {
-		logx.WithContext(c.Request.Context()).Error(err.Error())
-		common.ErrorResponse(c, http.StatusBadGateway, "", err.Error())
+	if result == nil {
 		return
 	}
 	if !apiReq.Stream {
 		id := completions.GenerateCompletionID(29)
-		resp := completions.NewApiRespJson(id, apiReq.Model, result.Content)
+		finishReason := result.FinishReason
+		if finishReason == "" {
+			finishReason = "stop"
+		}
+		resp := completions.NewApiRespJsonWithReasoning(id, apiReq.Model, result.Content, result.Reasoning, finishReason)
 		if len(result.ToolCalls) > 0 {
 			resp = completions.NewToolCallsApiRespJson(id, apiReq.Model, result.ToolContent, result.ToolCalls)
+			resp.Choices[0].Message.ReasoningContent = result.Reasoning
 		}
 		resp.ConversationId = result.ConversationId
 		resp.MessageId = result.MessageId
+		promptTokens := completions.CountMessagesTokens(apiReq.Messages)
+		completionTokens := completions.CountTokens(result.Content + result.Reasoning + result.ToolContent)
+		resp.WithUsage(promptTokens, completionTokens)
 		c.JSON(http.StatusOK, resp)
 	}
+}
+
+func runChatCompletionConversation(c *gin.Context, apiReq *completions.ApiReq, chatReq *chat.Request) (*chatResult, error) {
+	response, backend, err := sendChatRequest(c, chatReq)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if backend == nil {
+		return nil, fmt.Errorf("backend client is nil")
+	}
+	if handleResponseError(c, response, backend.AccAuth) {
+		return nil, nil
+	}
+
+	var aggregated *chatResult
+	remaining := maxContinueCount()
+	if remaining <= 0 {
+		remaining = 1
+	}
+	streamID := completions.GenerateCompletionID(29)
+	for i := 0; i < remaining; i++ {
+		streamPart := apiReq.Stream
+		// continue 过程中 stream 需要持续写出 delta，但 stop/[DONE] 只在最后一轮写。
+		writeTerminal := i == remaining-1
+		part, err := handlerResponseWithOptions(c, apiReq, response, backend, streamPart, writeTerminal || !apiReq.Stream, streamID)
+		if err != nil {
+			return nil, err
+		}
+		if part == nil {
+			return aggregated, nil
+		}
+		if aggregated == nil {
+			aggregated = part
+		} else {
+			aggregated.Content += part.Content
+			if part.Reasoning != "" {
+				if aggregated.Reasoning != "" {
+					aggregated.Reasoning += part.Reasoning
+				} else {
+					aggregated.Reasoning = part.Reasoning
+				}
+			}
+			if part.ConversationId != "" {
+				aggregated.ConversationId = part.ConversationId
+			}
+			if part.MessageId != "" {
+				aggregated.MessageId = part.MessageId
+			}
+			if part.FinishReason != "" {
+				aggregated.FinishReason = part.FinishReason
+			}
+			if len(part.ToolCalls) > 0 {
+				aggregated.ToolCalls = part.ToolCalls
+				aggregated.ToolContent = part.ToolContent
+			}
+		}
+		// 工具调用或非 max_tokens 场景不自动 continue
+		if len(aggregated.ToolCalls) > 0 || aggregated.FinishReason != "length" {
+			if apiReq.Stream && !writeTerminal {
+				// 提前结束时补写 stop/[DONE]
+				_ = writeStreamTerminal(c, apiReq, streamID, aggregated)
+			}
+			break
+		}
+		if aggregated.ConversationId == "" || aggregated.MessageId == "" {
+			break
+		}
+		if i == remaining-1 {
+			break
+		}
+		applyContinueRequest(chatReq, aggregated.ConversationId, aggregated.MessageId)
+		nextResp, err := sendChatRequestWithBackend(backend, chatReq)
+		if err != nil {
+			return aggregated, err
+		}
+		response.Body.Close()
+		response = nextResp
+		defer response.Body.Close()
+		if handleResponseError(c, response, backend.AccAuth) {
+			return aggregated, nil
+		}
+		// 自动 continue 后把 finish_reason 重置，等待新一轮结果
+		aggregated.FinishReason = ""
+	}
+	if aggregated != nil && backend != nil {
+		backend.NoteConversation(aggregated.ConversationId)
+		backend.AsyncSentinelPing(aggregated.ConversationId, aggregated.MessageId)
+	}
+	return aggregated, nil
 }
 
 func prepareFunctionCallingRequest(apiReq *completions.ApiReq) error {
@@ -225,6 +317,7 @@ func parseRateLimitString(value string, now time.Time) int64 {
 
 type chatResult struct {
 	Content        string
+	Reasoning      string
 	ConversationId string
 	MessageId      string
 	FinishReason   string
@@ -233,22 +326,41 @@ type chatResult struct {
 }
 
 type chatStreamEvent struct {
-	Response     chat.Response
-	Delta        string
-	Text         string
-	IsFirstChunk bool
-	Result       *chatResult
+	Response       chat.Response
+	Delta          string
+	Text           string
+	ReasoningDelta string
+	IsFirstChunk   bool
+	IsReasoning    bool
+	Result         *chatResult
 }
 
 func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) (*chatResult, error) {
+	return handleChatStreamWithBackend(resp, nil, onEvent)
+}
+
+func handleChatStreamWithBackend(resp *http.Response, backend *chatgpt_backend.Client, onEvent func(chatStreamEvent) error) (*chatResult, error) {
 	reader := bufio.NewReader(resp.Body)
 	var previousText chat.StringStruct
+	var previousReasoning chat.StringStruct
 	isFirstChunk := true
+	activeChannel := ""
+	handoffTopicID := ""
+	readingWebsocket := false
 	result := &chatResult{}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
+				if !readingWebsocket && handoffTopicID != "" && previousText.Text == "" && backend != nil {
+					wsReader, wsErr := openChatWebsocketHandoff(backend, handoffTopicID)
+					if wsErr == nil && wsReader != nil {
+						defer wsReader.Close()
+						reader = bufio.NewReader(wsReader)
+						readingWebsocket = true
+						continue
+					}
+				}
 				break
 			}
 			return nil, err
@@ -262,6 +374,12 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 		}
 		if payload == "[DONE]" {
 			break
+		}
+		if topicID, skip := handoffTopicFromPayload(payload); skip {
+			if topicID != "" {
+				handoffTopicID = topicID
+			}
+			continue
 		}
 		// Filter out internal tool noise
 		if shouldSkipInternalToolOutput(payload) {
@@ -282,9 +400,14 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 		if chatResp.Message.Id != "" {
 			result.MessageId = chatResp.Message.Id
 		}
+		if channel := extractStreamChannel(rawEvent); channel != "" {
+			activeChannel = channel
+		}
 		if chatResp.Message.Metadata.MessageType != "" &&
 			chatResp.Message.Metadata.MessageType != "next" &&
-			chatResp.Message.Metadata.MessageType != "continue" {
+			chatResp.Message.Metadata.MessageType != "continue" &&
+			activeChannel != "analysis" &&
+			activeChannel != "final" {
 			continue
 		}
 		text := chatResponseText(chatResp)
@@ -295,6 +418,39 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 			}
 		}
 		if text == "" {
+			continue
+		}
+		if activeChannel == "analysis" {
+			delta := completions.DeltaText(text, previousReasoning.Text)
+			if !isFirstChunk && delta == "" {
+				continue
+			}
+			previousReasoning.Text = text
+			result.Reasoning = previousReasoning.Text
+			if onEvent != nil {
+				if err := onEvent(chatStreamEvent{
+					Response:       chatResp,
+					ReasoningDelta: delta,
+					Text:           previousText.Text,
+					IsFirstChunk:   isFirstChunk,
+					IsReasoning:    true,
+					Result:         result,
+				}); err != nil {
+					result.Content = previousText.Text
+					result.Reasoning = previousReasoning.Text
+					return result, err
+				}
+			}
+			isFirstChunk = false
+			if chatResp.Message.Metadata.FinishDetails != nil {
+				result.FinishReason = normalizeFinishReason(chatResp.Message.Metadata.FinishDetails.Type)
+			}
+			continue
+		}
+		if chatResp.Message.Metadata.MessageType != "" &&
+			chatResp.Message.Metadata.MessageType != "next" &&
+			chatResp.Message.Metadata.MessageType != "continue" &&
+			activeChannel != "final" {
 			continue
 		}
 		delta := completions.DeltaText(text, previousText.Text)
@@ -311,6 +467,7 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 				Result:       result,
 			}); err != nil {
 				result.Content = previousText.Text
+				result.Reasoning = previousReasoning.Text
 				return result, err
 			}
 		}
@@ -320,6 +477,7 @@ func handleChatStream(resp *http.Response, onEvent func(chatStreamEvent) error) 
 		}
 	}
 	result.Content = previousText.Text
+	result.Reasoning = previousReasoning.Text
 	return result, nil
 }
 
@@ -482,6 +640,27 @@ func patchTextValue(value interface{}) string {
 	}
 }
 
+func extractStreamChannel(value interface{}) string {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		if channel := strings.TrimSpace(responseStringValue(v["channel"], "")); channel != "" {
+			return channel
+		}
+		for _, key := range []string{"message", "v", "delta", "metadata"} {
+			if nested := extractStreamChannel(v[key]); nested != "" {
+				return nested
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if nested := extractStreamChannel(item); nested != "" {
+				return nested
+			}
+		}
+	}
+	return ""
+}
+
 func normalizeFinishReason(reason string) string {
 	switch strings.TrimSpace(reason) {
 	case "", "stop":
@@ -536,16 +715,38 @@ func shouldSkipInternalToolOutput(payload string) bool {
 }
 
 func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Response) (*chatResult, error) {
-	if apiReq.Stream {
+	return handlerResponseWithOptions(c, apiReq, resp, nil, apiReq.Stream, true, completions.GenerateCompletionID(29))
+}
+
+func handlerResponseWithOptions(c *gin.Context, apiReq *completions.ApiReq, resp *http.Response, backend *chatgpt_backend.Client, stream bool, writeTerminal bool, id string) (*chatResult, error) {
+	if stream {
 		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
 	} else {
 		c.Header("Content-Type", "application/json")
 	}
-	id := completions.GenerateCompletionID(29)
+	if id == "" {
+		id = completions.GenerateCompletionID(29)
+	}
 	hasTools := completions.HasTools(apiReq)
 	detector := completions.NewStreamToolDetector(completions.ToolifyTriggerSignal)
-	result, err := handleChatStream(resp, func(event chatStreamEvent) error {
-		if !apiReq.Stream {
+	result, err := handleChatStreamWithBackend(resp, backend, func(event chatStreamEvent) error {
+		if !stream {
+			return nil
+		}
+		if event.IsReasoning {
+			if event.ReasoningDelta == "" {
+				return nil
+			}
+			apiRespJson := completions.NewReasoningApiRespStream(id, apiReq.Model, event.ReasoningDelta)
+			apiRespJson.ConversationId = event.Response.ConversationId
+			apiRespJson.MessageId = event.Response.Message.Id
+			if _, err := c.Writer.WriteString("data: " + apiRespJson.String() + "\n\n"); err != nil {
+				return err
+			}
+			c.Writer.Flush()
 			return nil
 		}
 		if hasTools {
@@ -581,7 +782,7 @@ func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Resp
 	if !hasTools && apiReq.HasToolResults {
 		result.Content = completions.StripFunctionCallXML(result.Content)
 	}
-	if apiReq.Stream && hasTools {
+	if stream && hasTools {
 		if err == errToolCallsStreamFinished {
 			return result, nil
 		}
@@ -609,14 +810,37 @@ func handlerResponse(c *gin.Context, apiReq *completions.ApiReq, resp *http.Resp
 			}
 		}
 	}
-	if apiReq.Stream {
-		finalLine := completions.StopChunk(id, apiReq.Model, result.FinishReason)
-		finalLine.ConversationId = result.ConversationId
-		finalLine.MessageId = result.MessageId
-		_, _ = c.Writer.WriteString(fmt.Sprint("data: ", finalLine.String(), "\n\n"))
-		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+	if stream && writeTerminal {
+		if err := writeStreamTerminal(c, apiReq, id, result); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
+}
+
+func writeStreamTerminal(c *gin.Context, apiReq *completions.ApiReq, id string, result *chatResult) error {
+	if result == nil {
+		result = &chatResult{}
+	}
+	finalLine := completions.StopChunk(id, apiReq.Model, result.FinishReason)
+	finalLine.ConversationId = result.ConversationId
+	finalLine.MessageId = result.MessageId
+	if _, err := c.Writer.WriteString(fmt.Sprint("data: ", finalLine.String(), "\n\n")); err != nil {
+		return err
+	}
+	if apiReq.StreamOptions != nil && apiReq.StreamOptions.IncludeUsage {
+		promptTokens := completions.CountMessagesTokens(apiReq.Messages)
+		completionTokens := completions.CountTokens(result.Content + result.Reasoning + result.ToolContent)
+		usageLine := completions.UsageChunk(id, apiReq.Model, promptTokens, completionTokens)
+		if _, err := c.Writer.WriteString(fmt.Sprint("data: ", usageLine.String(), "\n\n")); err != nil {
+			return err
+		}
+	}
+	if _, err := c.Writer.WriteString("data: [DONE]\n\n"); err != nil {
+		return err
+	}
+	c.Writer.Flush()
+	return nil
 }
 
 func streamFunctionCallingDelta(c *gin.Context, id string, apiReq *completions.ApiReq, detector *completions.StreamToolDetector, event chatStreamEvent) error {

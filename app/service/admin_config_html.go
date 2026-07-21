@@ -439,6 +439,8 @@ var adminConfigHTML = []byte(`<!doctype html>
         access_token: emptySecret(),
         refresh_token: emptySecret(),
         account_id: '',
+        team_user_id: '',
+        puid: '',
         last_refresh: '',
         email: '',
         type: 'codex',
@@ -456,6 +458,8 @@ var adminConfigHTML = []byte(`<!doctype html>
         access_token: secretItem(account.access_token),
         refresh_token: secretItem(account.refresh_token),
         account_id: account.account_id || '',
+        team_user_id: account.team_user_id || '',
+        puid: account.puid || '',
         last_refresh: account.last_refresh || '',
         email: account.email || '',
         type: account.type || '',
@@ -525,7 +529,9 @@ var adminConfigHTML = []byte(`<!doctype html>
           '<div class="account-body">' +
             '<div class="grid-2">' +
               input('Email', 'email', account.email, 'user@example.com') +
-              input('Account ID', 'account_id', account.account_id, '') +
+              input('Account ID / Team', 'account_id', account.account_id, 'Chatgpt-Account-Id (team workspace)') +
+              input('Team User ID', 'team_user_id', account.team_user_id, 'optional alias; overrides account_id when set') +
+              input('PUID', 'puid', account.puid, '_puid cookie for plus/team accounts') +
             '</div>' +
             '<div class="grid-2">' +
               secretInput('Access token', 'access_token', account.access_token, 'new access token') +

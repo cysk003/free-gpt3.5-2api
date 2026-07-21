@@ -59,7 +59,12 @@ chatgpts:
   - id_token: optional_id_token
     access_token: real_access_token
     refresh_token: optional_refresh_token
-    account_id: optional_account_id
+    # Team 工作区：自动注入 Header Chatgpt-Account-Id
+    account_id: optional_team_or_account_id
+    # 可选别名；非空时优先于 account_id
+    team_user_id: ""
+    # Plus/Team 账号 cookie：自动注入 _puid
+    puid: optional_puid_cookie
     last_refresh: ""
     email: optional_email
     type: codex
@@ -72,8 +77,10 @@ chatgpts:
 - `auth.access_tokens` 保存裸 token，不要写 `Bearer`；请求时仍使用标准的 `Authorization: Bearer <token>`。
 - `auth.access_token_prefix` 配置直传真实 access token 的前缀；默认空列表会关闭直传模式。启用后，请求头里的 `Bearer <prefix><real_access_token>` 会跳过账号池，并把去掉 `<prefix>` 后的真实 access token 传给上游。前缀务必使用私有且难猜的值。
 - 如果 `auth.access_tokens` 为空，服务启动时会随机生成一个 `sk-` token，写回配置文件，并在日志中打印 `current auth: ...`。
-- `chatgpts` 是账号池配置，每个账号只有 `access_token` 是必要配置；`proxy`、`id_token`、`refresh_token`、`email` 等字段都是可选字段。
+- `chatgpts` 是账号池配置，每个账号只有 `access_token` 是必要配置；其余字段可选。
 - `chatgpts[].access_token` 是账号池的真实上游 access token。通过本地 `sk-` key 请求时会从这里选择账号。
+- `chatgpts[].account_id` / `chatgpts[].team_user_id`：Team 工作区 ID，请求上游时自动注入 `Chatgpt-Account-Id`。`team_user_id` 非空时优先。
+- `chatgpts[].puid`：Plus/Team 的 `_puid` 值，请求上游时自动注入 cookie `_puid`。
 - 代理优先级为账号代理优先：`chatgpts[].proxy` 不为空时使用账号代理；为空时回退到全局 `proxy`。
 - `chatgpt_base_url` 为空时默认使用 `https://chatgpt.com`。
 
@@ -87,7 +94,7 @@ go run ./cmd
 
 ## Web 管理
 
-服务启动后，可以打开 `http://<host>:<port>/admin` 管理 YAML 配置里的本地 API key、access token 直传前缀、全局代理，以及 `chatgpts` 账号池。
+服务启动后，可以打开 `http://<host>:<port>/admin` 管理 YAML 配置里的本地 API key、access token 直传前缀、全局代理，以及 `chatgpts` 账号池（含 Team / PUID）。
 
 - 管理 API 只接受配置文件中的 `auth.access_tokens` 作为登录密钥，不接受 `access_token_prefix` 直传 token。
 - 页面不会回显真实 token，已保存的密钥只显示遮罩值；输入框留空会保留原值，填新值才会覆盖。
@@ -417,6 +424,8 @@ curl http://127.0.0.1:3040/v1/responses \
 - `turnstile token is required` 或 `turnstile token failed`：上游要求 Turnstile 校验，需确认账号 token、代理和上游访问环境是否可用。
 - 账号池不可用：检查 `chatgpts[].access_token` 是否为空、是否过期，以及账号是否处于冷却时间。
 - 代理不生效：先检查账号自己的 `chatgpts[].proxy`，它会优先于全局 `proxy`。
+- Team 账号未进入工作区：检查 `chatgpts[].account_id` 或 `team_user_id` 是否正确。
+- Plus/Team cookie 相关异常：检查 `chatgpts[].puid` 是否配置；服务会自动注入 `_puid`。
 
 ## 参考项目
 

@@ -60,10 +60,27 @@ type chatgpt struct {
 	IdToken      string `yaml:"id_token"`
 	AccessToken  string `yaml:"access_token"`
 	RefreshToken string `yaml:"refresh_token"`
-	AccountId    string `yaml:"account_id"`
-	LastRefresh  string `yaml:"last_refresh"`
-	Email        string `yaml:"email"`
-	Type         string `yaml:"type"`
-	Expired      string `yaml:"expired"`
-	Proxy        string `yaml:"proxy"`
+	// AccountId 映射为 Chatgpt-Account-Id（Team workspace）。
+	AccountId string `yaml:"account_id"`
+	// TeamUserID 可选别名；非空时优先于 account_id。
+	TeamUserID  string `yaml:"team_user_id"`
+	PUID        string `yaml:"puid"`
+	LastRefresh string `yaml:"last_refresh"`
+	Email       string `yaml:"email"`
+	Type        string `yaml:"type"`
+	Expired     string `yaml:"expired"`
+	Proxy       string `yaml:"proxy"`
+}
+
+// ResolveTeamUserID 返回应注入 Chatgpt-Account-Id 的值。
+func (a chatgpt) ResolveTeamUserID() string {
+	if v := strings.TrimSpace(a.TeamUserID); v != "" {
+		return v
+	}
+	return strings.TrimSpace(a.AccountId)
+}
+
+// ResolvePUID 返回应注入 _puid cookie 的值。
+func (a chatgpt) ResolvePUID() string {
+	return strings.TrimSpace(a.PUID)
 }

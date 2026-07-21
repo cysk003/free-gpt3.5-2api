@@ -14,9 +14,10 @@ type ApiRespJson struct {
 }
 
 type ApiRespJsonMessage struct {
-	Role      string     `json:"role,omitempty"`
-	Content   *string    `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          *string    `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ApiRespJsonChoice struct {
@@ -38,6 +39,13 @@ type ApiRespJsonUsage struct {
 }
 
 func NewApiRespJson(id string, model string, content string) *ApiRespJson {
+	return NewApiRespJsonWithReasoning(id, model, content, "", "stop")
+}
+
+func NewApiRespJsonWithReasoning(id string, model string, content string, reasoning string, finishReason string) *ApiRespJson {
+	if finishReason == "" {
+		finishReason = "stop"
+	}
 	contentPtr := content
 	return &ApiRespJson{
 		ID:      id,
@@ -52,14 +60,27 @@ func NewApiRespJson(id string, model string, content string) *ApiRespJson {
 		Choices: []ApiRespJsonChoice{
 			{
 				Message: ApiRespJsonMessage{
-					Role:    "assistant",
-					Content: &contentPtr,
+					Role:             "assistant",
+					Content:          &contentPtr,
+					ReasoningContent: reasoning,
 				},
-				FinishReason: "stop",
+				FinishReason: finishReason,
 				Index:        0,
 			},
 		},
 	}
+}
+
+func (r *ApiRespJson) WithUsage(promptTokens, completionTokens int) *ApiRespJson {
+	if r == nil {
+		return r
+	}
+	r.Usage = ApiRespJsonUsage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+	}
+	return r
 }
 
 func NewToolCallsApiRespJson(id string, model string, content string, toolCalls []ToolCall) *ApiRespJson {

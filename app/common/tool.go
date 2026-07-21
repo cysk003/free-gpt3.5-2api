@@ -2,47 +2,33 @@ package common
 
 import (
 	"chat2api/app/constant"
-	"math/rand"
-	"time"
 
 	"github.com/bogdanfinn/tls-client/profiles"
 )
 
+// FixedUserAgent 对齐 aurora/util.FixedUserAgent（桌面 Chrome 148）。
+const FixedUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+
+// ClientBuildNumber 对齐 aurora headerbuilder。
+const ClientBuildNumber = "7823760"
+
 var (
-	clientProfile   = getRandomClientProfile()
-	ua              = FakeUaAgent()
+	clientProfile   = profiles.Chrome_124
+	ua              = FixedUserAgent
 	updateThreshold = constant.ReTry
 )
 
 func SubUpdateThreshold() {
 	updateThreshold--
 }
-func getRandomClientProfile() profiles.ClientProfile {
-	// 初始化随机数生成器
-	seed := time.Now().UnixNano()
-	rng := rand.New(rand.NewSource(seed))
-	clientProfiles := []profiles.ClientProfile{
-		profiles.Chrome_110,
-		profiles.Okhttp4Android13,
-		profiles.Opera_90,
-	}
-	// 随机选择一个
-	randomIndex := rng.Intn(len(clientProfiles))
-	return clientProfiles[randomIndex]
-}
 
+// GetClientProfile 固定桌面 Chrome TLS 画像，避免与 UA/sec-ch-ua 互相打架。
+// 当前依赖链 tls-client@v1.7.5 最高可用 Chrome_124。
 func GetClientProfile() profiles.ClientProfile {
-	if updateThreshold < 0 {
-		clientProfile = getRandomClientProfile()
-		updateThreshold = constant.ReTry
-	}
 	return clientProfile
 }
 
+// GetUa 返回固定桌面 Chrome UA。
 func GetUa() string {
-	if updateThreshold < 0 {
-		ua = FakeUaAgent()
-		updateThreshold = constant.ReTry
-	}
 	return ua
 }

@@ -25,11 +25,27 @@ func Responses(c *gin.Context) {
 		return
 	}
 	compReq := &completions.ApiReq{
-		Model:      responses.NormalizeModel(apiReq.Model),
-		Stream:     apiReq.Stream,
-		Messages:   completionMessagesFromResponse(apiReq),
-		Tools:      completionToolsFromResponses(apiReq.Tools),
-		ToolChoice: completionToolChoiceFromResponses(apiReq.ToolChoice),
+		Model:               responses.NormalizeModel(apiReq.Model),
+		Stream:              apiReq.Stream,
+		Messages:            completionMessagesFromResponse(apiReq),
+		Tools:               completionToolsFromResponses(apiReq.Tools),
+		ToolChoice:          completionToolChoiceFromResponses(apiReq.ToolChoice),
+		Temperature:         apiReq.Temperature,
+		TopP:                apiReq.TopP,
+		MaxTokens:           apiReq.MaxOutputTokens,
+		MaxCompletionTokens: apiReq.MaxOutputTokens,
+		User:                apiReq.User,
+		Metadata:            apiReq.Metadata,
+		Store:               apiReq.Store,
+	}
+	if apiReq.Text != nil && apiReq.Text.Format != nil {
+		compReq.ResponseFormat = &completions.ResponseFormat{
+			Type:       apiReq.Text.Format.Type,
+			JSONSchema: apiReq.Text.Format.JSONSchema,
+		}
+	}
+	if apiReq.Reasoning != nil {
+		compReq.ReasoningEffort = apiReq.Reasoning.Effort
 	}
 	if len(compReq.Messages) == 0 {
 		common.ErrorResponse(c, http.StatusBadRequest, "input text is required", nil)

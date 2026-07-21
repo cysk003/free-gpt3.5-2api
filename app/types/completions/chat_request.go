@@ -1,6 +1,7 @@
 package completions
 
 import (
+	"fmt"
 	"strings"
 
 	"chat2api/app/types/chat"
@@ -9,7 +10,24 @@ import (
 )
 
 func BuildChatRequest(apiReq *ApiReq) *chat.Request {
-	messages := make([]chat.Message, 0, len(apiReq.Messages))
+	messages := make([]chat.Message, 0, len(apiReq.Messages)+4)
+	systemHints := make([]string, 0)
+	if hint := responseFormatHint(apiReq.ResponseFormat); hint != "" {
+		systemHints = append(systemHints, hint)
+	}
+	if hint := stopHint(apiReq.Stop); hint != "" {
+		systemHints = append(systemHints, hint)
+	}
+	if hint := maxTokenHint(apiReq); hint != "" {
+		systemHints = append(systemHints, hint)
+	}
+	if len(systemHints) > 0 {
+		messages = append(messages, chat.Message{
+			Id:      uuid.New().String(),
+			Author:  chat.Author{Role: "system"},
+			Content: chat.Content{ContentType: "text", Parts: []interface{}{strings.Join(systemHints, "\n\n")}},
+		})
+	}
 	for _, apiMessage := range apiReq.Messages {
 		content := chatContentFromOpenAI(apiMessage.Content)
 		messages = append(messages, chat.Message{
@@ -57,6 +75,62 @@ func BuildChatRequest(apiReq *ApiReq) *chat.Request {
 			ScreenHeight:    1440,
 			ScreenWidth:     2560,
 		},
+		ThinkingEffort: normalizeThinkingEffort(apiReq.ReasoningEffort),
+	}
+}
+
+func responseFormatHint(format *ResponseFormat) string {
+	if format == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(format.Type)) {
+	case "json_object":
+		return "You must respond in valid JSON format only. Do not include any text outside the JSON object."
+	case "json_schema":
+		return "You must respond in valid JSON format only, following the specified schema."
+	default:
+		return ""
+	}
+}
+
+func stopHint(stop *StopParam) string {
+	if stop == nil || len(stop.Values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(stop.Values))
+	for _, value := range stop.Values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%q", value))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Stop generating when you reach any of these sequences: " + strings.Join(parts, " or ") + "."
+}
+
+func maxTokenHint(apiReq *ApiReq) string {
+	if apiReq.MaxCompletionTokens != nil && *apiReq.MaxCompletionTokens > 0 {
+		return fmt.Sprintf("Limit your response to at most %d tokens.", *apiReq.MaxCompletionTokens)
+	}
+	if apiReq.MaxTokens != nil && *apiReq.MaxTokens > 0 {
+		return fmt.Sprintf("Limit your response to at most %d tokens.", *apiReq.MaxTokens)
+	}
+	return ""
+}
+
+func normalizeThinkingEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low":
+		return "low"
+	case "high":
+		return "high"
+	case "medium", "standard", "":
+		return "standard"
+	default:
+		return "standard"
 	}
 }
 

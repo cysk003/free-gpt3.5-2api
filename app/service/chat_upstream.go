@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"chat2api/app/browserfp"
 	"chat2api/app/chatgpt_backend"
 	"chat2api/app/common"
 	"chat2api/app/types/chat"
@@ -9,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/aurorax-neo/tls_client_httpi"
@@ -16,30 +19,41 @@ import (
 	"github.com/google/uuid"
 )
 
-func sendChatRequest(c *gin.Context, chatReq *chat.Request) (*http.Response, string, error) {
+func sendChatRequest(c *gin.Context, chatReq *chat.Request) (*http.Response, *chatgpt_backend.Client, error) {
 	backend, err := chatgpt_backend.New(c.Request.Header.Get("Authorization"), chatgpt_backend.Retry())
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	if err := prepareChatVisionInputs(backend, chatReq); err != nil {
-		return nil, backend.AccAuth, err
+		return nil, backend, err
 	}
 	applyChatTargetDefaults(backend, chatReq)
+	response, err := sendChatRequestWithBackend(backend, chatReq)
+	if err != nil {
+		return nil, backend, err
+	}
+	return response, backend, nil
+}
+
+func sendChatRequestWithBackend(backend *chatgpt_backend.Client, chatReq *chat.Request) (*http.Response, error) {
+	if backend == nil {
+		return nil, fmt.Errorf("backend client is nil")
+	}
 	upstreamURL := backend.ChatURL
 	conduitToken := ""
 	turnTraceID := uuid.New().String()
 	if shouldUseFConversation(backend) {
 		upstreamURL = backend.BaseURL + "/backend-api/f/conversation"
-		applyFConversationPayloadDefaults(chatReq)
+		applyFConversationPayloadDefaults(backend, chatReq)
 		var prepareErr error
 		conduitToken, prepareErr = prepareFConversation(backend, chatReq, turnTraceID)
 		if prepareErr != nil {
-			return nil, backend.AccAuth, prepareErr
+			return nil, prepareErr
 		}
 	}
 	body, err := common.Struct2BytesBuffer(chatReq)
 	if err != nil {
-		return nil, backend.AccAuth, err
+		return nil, err
 	}
 	headers, cookies := backend.Headers(upstreamURL)
 	headers.Set("accept", "text/event-stream")
@@ -54,15 +68,82 @@ func sendChatRequest(c *gin.Context, chatReq *chat.Request) (*http.Response, str
 	}
 	response, err := backend.HTTP.Request(tls_client_httpi.POST, upstreamURL, headers, cookies, body)
 	if err != nil {
-		return nil, backend.AccAuth, fmt.Errorf("upstream request failed: %w", err)
+		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
-	return response, backend.AccAuth, nil
+	return response, nil
+}
+
+func maxContinueCount() int {
+	v := strings.TrimSpace(os.Getenv("MAX_CONTINUE_COUNT"))
+	if v == "" {
+		return 3
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 3
+	}
+	return n
+}
+
+func applyContinueRequest(chatReq *chat.Request, conversationID, parentMessageID string) {
+	if chatReq == nil {
+		return
+	}
+	chatReq.Action = "continue"
+	chatReq.Messages = nil
+	chatReq.ConversationId = conversationID
+	chatReq.ParentMessageId = parentMessageID
 }
 
 func applyChatTargetDefaults(backend *chatgpt_backend.Client, chatReq *chat.Request) {
 	timezone, offset := backend.ChatTimezone()
 	chatReq.Timezone = timezone
 	chatReq.TimeZoneOffsetMin = offset
+	if chatReq != nil && chatReq.ConversationId != "" {
+		backend.NoteConversation(chatReq.ConversationId)
+	}
+	applyClientContextualInfo(backend, chatReq)
+}
+
+func applyClientContextualInfo(backend *chatgpt_backend.Client, chatReq *chat.Request) {
+	if chatReq == nil {
+		return
+	}
+	info := chat.ClientContextualInfo{
+		IsDarkMode:      false,
+		TimeSinceLoaded: 10,
+		PageHeight:      1014,
+		PageWidth:       1055,
+		PixelRatio:      1,
+		ScreenHeight:    1080,
+		ScreenWidth:     1920,
+		AppName:         "chatgpt.com",
+	}
+	if backend != nil {
+		if sec := backend.TimeSinceLoadedSeconds(); sec > 0 {
+			info.TimeSinceLoaded = sec
+		}
+	}
+	if fp := browserfp.Get(); fp != nil {
+		if fp.ScreenHeight > 0 {
+			info.ScreenHeight = fp.ScreenHeight
+		}
+		if fp.ScreenWidth > 0 {
+			info.ScreenWidth = fp.ScreenWidth
+		}
+		if fp.DevicePixelRatio > 0 {
+			info.PixelRatio = fp.DevicePixelRatio
+		}
+		info.PageHeight = fp.ScreenHeight - 66
+		if info.PageHeight < 600 {
+			info.PageHeight = 600
+		}
+		info.PageWidth = fp.ScreenWidth - 196
+		if info.PageWidth < 800 {
+			info.PageWidth = 800
+		}
+	}
+	chatReq.ClientContextualInfo = info
 }
 
 func shouldUseFConversation(backend *chatgpt_backend.Client) bool {
@@ -88,7 +169,7 @@ func messageHasAssetPointer(message chat.Message) bool {
 	return false
 }
 
-func applyFConversationPayloadDefaults(chatReq *chat.Request) {
+func applyFConversationPayloadDefaults(backend *chatgpt_backend.Client, chatReq *chat.Request) {
 	chatReq.ClientPrepareState = string(fConversationPrepareStateSuccess)
 	chatReq.EnableMessageFollowups = true
 	chatReq.SupportsBuffering = true
@@ -96,17 +177,10 @@ func applyFConversationPayloadDefaults(chatReq *chat.Request) {
 	chatReq.HistoryAndTrainingDisabled = false
 	chatReq.ParagenCotSummaryDisplayOverride = "allow"
 	chatReq.ForceParallelSwitch = "auto"
-	chatReq.ThinkingEffort = "standard"
-	chatReq.ClientContextualInfo = chat.ClientContextualInfo{
-		IsDarkMode:      false,
-		TimeSinceLoaded: 1200,
-		PageHeight:      1072,
-		PageWidth:       1724,
-		PixelRatio:      1.2,
-		ScreenHeight:    1440,
-		ScreenWidth:     2560,
-		AppName:         "chatgpt.com",
+	if strings.TrimSpace(chatReq.ThinkingEffort) == "" {
+		chatReq.ThinkingEffort = "standard"
 	}
+	applyClientContextualInfo(backend, chatReq)
 }
 
 type fConversationPrepareState string
@@ -216,6 +290,9 @@ func applySentinelHeaders(headers tls_client_httpi.Headers, backend *chatgpt_bac
 	}
 	if backend.Auth.TurnstileToken != "" {
 		headers.Set("openai-sentinel-turnstile-token", backend.Auth.TurnstileToken)
+	}
+	if soToken := backend.EnsureSOToken(); soToken != "" {
+		headers.Set("openai-sentinel-so-token", soToken)
 	}
 	if turnTraceID != "" {
 		headers.Set("x-oai-turn-trace-id", turnTraceID)

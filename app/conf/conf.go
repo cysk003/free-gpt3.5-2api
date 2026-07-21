@@ -205,9 +205,11 @@ func normalizeConfig(cfg *app) {
 			continue
 		}
 		pool.AddAccessToken(&token_pool.AccessToken{
-			Token:     "Bearer " + token,
-			ExpiresAt: time.Now().Add(24 * time.Hour).Unix(),
-			Proxy:     strings.TrimSpace(account.Proxy),
+			Token:      "Bearer " + token,
+			ExpiresAt:  time.Now().Add(24 * time.Hour).Unix(),
+			Proxy:      strings.TrimSpace(account.Proxy),
+			PUID:       account.ResolvePUID(),
+			TeamUserID: account.ResolveTeamUserID(),
 		})
 	}
 }

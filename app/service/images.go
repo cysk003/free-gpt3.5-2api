@@ -190,14 +190,14 @@ func collectConversationImageResponse(c *gin.Context, prompt string, images []st
 		return collectAuroraConversationImageResponse(c, prompt, tool)
 	}
 	chatReq := imageConversationRequest(prompt, images, tool)
-	resp, accessToken, err := sendChatRequest(c, chatReq)
+	resp, backend, err := sendChatRequest(c, chatReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return nil, fmt.Errorf("upstream returned status %d: %s (token=%s)", resp.StatusCode, string(body), maskUpstreamToken(accessToken))
+		return nil, fmt.Errorf("upstream returned status %d: %s (token=%s)", resp.StatusCode, string(body), maskUpstreamToken(backend.AccAuth))
 	}
 	return collectConversationImageFromSSE(resp.Body, nil)
 }
@@ -209,7 +209,7 @@ func collectAuroraConversationImageResponse(c *gin.Context, prompt string, tool 
 	}
 	chatReq := imageConversationRequest(prompt, nil, tool)
 	applyChatTargetDefaults(backend, chatReq)
-	applyFConversationPayloadDefaults(chatReq)
+	applyFConversationPayloadDefaults(backend, chatReq)
 	turnTraceID := uuid.New().String()
 	conduitToken, err := prepareFConversation(backend, chatReq, turnTraceID)
 	if err != nil {

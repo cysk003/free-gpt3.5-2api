@@ -9,7 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"chat2api/app/browserfp"
+	"chat2api/app/fingerprint"
 )
 
 const (
@@ -20,43 +21,6 @@ const (
 )
 
 var (
-	screenSizes  = [][2]int{{1920, 1080}, {2560, 1440}, {1536, 864}, {1440, 900}, {1366, 768}}
-	documentKeys = []string{
-		"_reactListening8in7sfyhjvp", "_reactListeningo743lnnpvdg",
-		"_reactContainer$5pyziap1brc", "__reactContainer$b63yiita51i",
-		"location", "cookie", "referrer", "currentScript", "body", "head", "documentElement",
-	}
-	navigatorKeys = []string{
-		"windowControlsOverlay−[object WindowControlsOverlay]",
-		"geolocation−[object Geolocation]",
-		"clipboard−[object Clipboard]",
-		"mediaDevices−[object MediaDevices]",
-		"permissions−[object Permissions]",
-		"bluetooth−[object Bluetooth]",
-		"usb−[object USB]",
-		"serial−[object Serial]",
-		"hid−[object HID]",
-		"presentation−[object Presentation]",
-		"credentials−[object CredentialsContainer]",
-	}
-	windowKeys = []string{
-		"onchange", "onclick", "onload", "onerror", "onresize",
-		"onmouseover", "onmouseout", "onfocus", "onblur", "onscroll",
-		"onkeydown", "onkeyup", "onkeypress",
-		"requestIdleCallback", "requestAnimationFrame", "setTimeout",
-		"fetch", "console", "Promise", "Map", "Set", "WeakMap", "WeakSet",
-		"crypto", "performance", "navigator", "document", "location", "history",
-		"localStorage", "sessionStorage", "indexedDB",
-		"Image", "XMLHttpRequest", "FormData", "Headers", "Request", "Response",
-		"alert", "confirm", "prompt", "close", "focus", "blur",
-		"addEventListener", "removeEventListener", "dispatchEvent",
-		"scrollTo", "scrollBy", "scroll", "matchMedia", "getComputedStyle",
-		"getSelection", "find", "stop", "open", "print", "captureEvents",
-		"releaseEvents", "queueMicrotask", "reportError", "structuredClone",
-		"isSecureContext", "crossOriginIsolated", "originAgentCluster",
-		"speechSynthesis", "MediaSource", "Blob", "File", "FileReader",
-		"Atomics", "SharedArrayBuffer", "WebAssembly", "BigInt", "Symbol", "Proxy",
-	}
 	scriptSrcRE = regexp.MustCompile(`<script\b[^>]*\bsrc=["']([^"']+)["']`)
 	dataBuildRE = regexp.MustCompile(`(?:c/[^/]*/_|<html[^>]*data-build=["']([^"']*)["'])`)
 )
@@ -78,23 +42,20 @@ func ParseResources(html string) Resources {
 	for _, match := range scriptSrcRE.FindAllStringSubmatch(html, -1) {
 		resources.ScriptSources = append(resources.ScriptSources, match[1])
 		if resources.DataBuild == "" {
-			if build := regexp.MustCompile(`c/[^/]*/_`).FindString(match[1]); build != "" {
-				resources.DataBuild = build
+			if parts := strings.Split(match[1], "/"); len(parts) > 2 && parts[1] == "cdn" {
+				// keep scanning
 			}
 		}
 	}
-	if len(resources.ScriptSources) == 0 {
-		resources.ScriptSources = []string{defaultPowScript}
+	if m := dataBuildRE.FindStringSubmatch(html); len(m) > 1 && m[1] != "" {
+		resources.DataBuild = m[1]
 	}
+	// fallback: try data-build attribute patterns already covered
 	if resources.DataBuild == "" {
-		for _, match := range dataBuildRE.FindAllStringSubmatch(html, -1) {
-			if len(match) > 1 && match[1] != "" {
-				resources.DataBuild = match[1]
-				break
-			}
-			if match[0] != "" && strings.HasPrefix(match[0], "c/") {
-				resources.DataBuild = match[0]
-				break
+		if idx := strings.Index(html, `data-build="`); idx >= 0 {
+			rest := html[idx+len(`data-build="`):]
+			if end := strings.Index(rest, `"`); end > 0 {
+				resources.DataBuild = rest[:end]
 			}
 		}
 	}
@@ -107,14 +68,10 @@ func CalcProofToken(seed string, difficulty string, userAgent string, deviceID s
 	}
 	start := time.Now()
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	powConfig := fingerprintConfig{
-		UserAgent: userAgent,
-		DeviceID:  deviceID,
-		Resources: firstResource(resources),
-	}
+	res := firstResource(resources)
 	for i := 0; i < powMaxAttempts; i++ {
 		elapsed := time.Since(start).Milliseconds()
-		config := powConfig.build(rng, &i, &elapsed)
+		config := buildFingerprintConfig(userAgent, deviceID, res, rng, &i, &elapsed)
 		encoded := encodeConfig(config)
 		hashResult := fnv1aHash(seed + encoded)
 		if len(difficulty) > len(hashResult) {
@@ -129,11 +86,15 @@ func CalcProofToken(seed string, difficulty string, userAgent string, deviceID s
 
 func LegacyRequirementsToken(userAgent string, deviceID string, resources ...Resources) string {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	config := fingerprintConfig{
-		UserAgent: userAgent,
-		DeviceID:  deviceID,
-		Resources: firstResource(resources),
-	}.build(rng, nil, nil)
+	config := buildFingerprintConfig(userAgent, deviceID, firstResource(resources), rng, nil, nil)
+	return "gAAAAAC" + encodeConfig(config) + "~S"
+}
+
+// RequirementsTokenNonce2 对齐 /sentinel/req 用的 fingerprint token (nonce=2)。
+func RequirementsTokenNonce2(userAgent string, deviceID string, resources ...Resources) string {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	nonce := 2
+	config := buildFingerprintConfig(userAgent, deviceID, firstResource(resources), rng, &nonce, nil)
 	return "gAAAAAC" + encodeConfig(config) + "~S"
 }
 
@@ -144,94 +105,63 @@ func firstResource(resources []Resources) Resources {
 	return Resources{ScriptSources: []string{defaultPowScript}}
 }
 
-type fingerprintConfig struct {
-	UserAgent string
-	DeviceID  string
-	Resources Resources
-}
-
-func (c fingerprintConfig) build(rng *rand.Rand, nonce *int, elapsedMs *int64) []interface{} {
+func buildFingerprintConfig(userAgent, deviceID string, resources Resources, rng *rand.Rand, nonce *int, elapsedMs *int64) []interface{} {
 	if rng == nil {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
-	resources := c.Resources
-	scriptSources := append([]string{}, resources.ScriptSources...)
-	if len(scriptSources) == 0 {
-		scriptSources = []string{defaultPowScript}
+	fp := browserfp.Get()
+	if fp == nil {
+		browserfp.Init()
+		fp = browserfp.Get()
 	}
-	scriptSources = append(scriptSources, sentinelSDKScript)
-	screen := screenSizes[rng.Intn(len(screenSizes))]
-	perfNow := rng.Float64() * 10000
-	timeOrigin := float64(time.Now().UnixMilli()) - perfNow
+	ua := strings.TrimSpace(userAgent)
+	if ua == "" {
+		ua = browserfp.UserAgents[0]
+	}
+	buildID := fp.BuildID
+	if strings.TrimSpace(resources.DataBuild) != "" {
+		buildID = strings.TrimSpace(resources.DataBuild)
+	}
+	if buildID == "" {
+		buildID = browserfp.DefaultBuildID
+	}
+
+	opts := fingerprint.Options{
+		UserAgent:           ua,
+		Languages:           []string{"en-US", "en"},
+		Platform:            "Win32",
+		ScreenWidth:         fp.ScreenWidth,
+		ScreenHeight:        fp.ScreenHeight,
+		HardwareConcurrency: fp.HardwareConcurrency,
+		JSHeapSizeLimit:     fp.JSHeapSizeLimit,
+		BuildID:             buildID,
+		Timezone:            "America/Los_Angeles",
+		PageOpenedSeconds:   float64(8 + rng.Intn(20)),
+		Rand:                rng,
+	}
+	// 若页面资源里有 script，优先覆盖 ScriptURLs 随机池的 [5]
+	config := fingerprint.Build25(opts)
+	if len(resources.ScriptSources) > 0 {
+		scripts := append([]string{}, resources.ScriptSources...)
+		scripts = append(scripts, sentinelSDKScript)
+		config[5] = scripts[rng.Intn(len(scripts))]
+	}
+
 	nonceValue := 1
 	if nonce != nil {
 		nonceValue = *nonce
 	}
-	randomOrElapsed := rng.Float64()
-	if elapsedMs != nil {
-		randomOrElapsed = float64(*elapsedMs)
-	}
-	userAgent := c.UserAgent
-	if userAgent == "" {
-		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-	}
-	deviceID := c.DeviceID
-	if deviceID == "" {
-		deviceID = uuid.NewString()
-	}
-	return []interface{}{
-		screen[0] + screen[1],
-		jsDateString(time.Now(), "America/Los_Angeles"),
-		int64(4294967296),
-		nonceValue,
-		userAgent,
-		scriptSources[rng.Intn(len(scriptSources))],
-		resources.DataBuild,
-		"en-US",
-		"en-US,en",
-		randomOrElapsed,
-		navigatorKeys[rng.Intn(len(navigatorKeys))],
-		documentKeys[rng.Intn(len(documentKeys))],
-		windowKeys[rng.Intn(len(windowKeys))],
-		perfNow,
-		deviceID,
-		"",
-		8 + rng.Intn(4)*4,
-		timeOrigin,
-		0,
-		0,
-		0,
-		0,
-		0,
-		0,
-		0,
-	}
-}
+	config[3] = nonceValue
 
-func jsDateString(t time.Time, timezone string) string {
-	if loc, err := time.LoadLocation(timezone); err == nil {
-		t = t.In(loc)
+	if elapsedMs != nil {
+		config[9] = float64(*elapsedMs)
 	}
-	head := t.Format("Mon Jan 2 2006 15:04:05")
-	_, offset := t.Zone()
-	sign := "+"
-	if offset < 0 {
-		sign = "-"
-		offset = -offset
+
+	if strings.TrimSpace(deviceID) == "" {
+		deviceID = "00000000-0000-4000-8000-000000000000"
 	}
-	hours := offset / 3600
-	minutes := (offset % 3600) / 60
-	name, _ := t.Zone()
-	full := map[string]string{
-		"PDT": "Pacific Daylight Time",
-		"PST": "Pacific Standard Time",
-		"EDT": "Eastern Daylight Time",
-		"EST": "Eastern Standard Time",
-	}[name]
-	if full == "" {
-		full = name
-	}
-	return fmt.Sprintf("%s GMT%s%02d%02d (%s)", head, sign, hours, minutes, full)
+	config[14] = deviceID
+	return config
 }
 
 func encodeConfig(config []interface{}) string {
@@ -250,12 +180,16 @@ func fnv1aHash(text string) string {
 	h := uint32(fnvOffset)
 	for _, ch := range text {
 		h ^= uint32(ch)
-		h *= fnvPrime
+		h = imul32(h, fnvPrime)
 	}
 	h ^= h >> 16
-	h *= 2246822507
+	h = imul32(h, 2246822507)
 	h ^= h >> 13
-	h *= 3266489909
+	h = imul32(h, 3266489909)
 	h ^= h >> 16
 	return fmt.Sprintf("%08x", h)
+}
+
+func imul32(a, b uint32) uint32 {
+	return uint32(int32(a) * int32(b))
 }
